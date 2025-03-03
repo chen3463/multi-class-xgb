@@ -7,21 +7,23 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
 from sklearn.inspection import permutation_importance
 from scipy.special import softmax
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler
 
-# Sample Data (Replace with actual dataset)
+# ---- 1. Load and Split Data ----
 X = pd.DataFrame(np.random.randn(10000, 20), columns=[f'feat_{i}' for i in range(20)])
 y = np.random.randint(0, 4, 10000)  # Multi-class labels (4 classes)
 
-# Split data
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+# Split into Train (64%) / Validation (16%) / Test (20%)
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.36, stratify=y, random_state=42)
+X_valid, X_test, y_valid, y_test = train_test_split(X_temp, y_temp, test_size=20/36, stratify=y_temp, random_state=42)
 
 # Scale Features
 scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
+X_valid = scaler.transform(X_valid)
 X_test = scaler.transform(X_test)
 
-# ---- 1. Feature Selection (SHAP + Permutation Importance) ----
+# ---- 2. Feature Selection (SHAP + Permutation Importance) ----
 def feature_selection(model, X_train, y_train):
     """Select features using SHAP and Permutation Importance."""
     model.fit(X_train, y_train)
@@ -40,7 +42,7 @@ def feature_selection(model, X_train, y_train):
 
     return selected_features
 
-# ---- 2. Custom Focal Loss for Multi-Class ----
+# ---- 3. Custom Focal Loss for Multi-Class ----
 def focal_loss(predt, dtrain, gamma=2.0):
     """Compute Focal Loss for XGBoost."""
     labels = dtrain.get_label().astype(int)
@@ -53,14 +55,14 @@ def focal_loss(predt, dtrain, gamma=2.0):
 
     return grad.flatten(), hess.flatten()
 
-# ---- 3. Custom AUCPR Metric ----
+# ---- 4. Custom AUCPR Metric ----
 def aucpr_metric(y_true, y_pred):
     """Compute AUCPR for Multi-Class Classification."""
     pred_probs = softmax(y_pred, axis=1)
     aucpr_scores = [average_precision_score((y_true == c).astype(int), pred_probs[:, c]) for c in range(pred_probs.shape[1])]
     return np.mean(aucpr_scores)
 
-# ---- 4. Hyperparameter Tuning using Optuna ----
+# ---- 5. Hyperparameter Tuning using Train + Validation ----
 def objective(trial):
     """Optimize XGBoost hyperparameters."""
     params = {
@@ -75,12 +77,12 @@ def objective(trial):
     }
 
     model = xgb.XGBClassifier(**params)
-    model.fit(X_train[:, selected_features], y_train)
+    model.fit(X_train[:, selected_features], y_train, eval_set=[(X_valid[:, selected_features], y_valid)], early_stopping_rounds=10, verbose=False)
     
-    y_pred = model.predict_proba(X_test[:, selected_features], output_margin=True)
-    return aucpr_metric(y_test, y_pred)
+    y_pred = model.predict_proba(X_valid[:, selected_features], output_margin=True)
+    return aucpr_metric(y_valid, y_pred)
 
-# ---- 5. Run Hyperparameter Tuning ----
+# ---- 6. Run Hyperparameter Tuning ----
 base_model = xgb.XGBClassifier(objective="multi:softprob", num_class=4)
 selected_features = feature_selection(base_model, X_train, y_train)
 
@@ -90,11 +92,14 @@ study.optimize(objective, n_trials=20)
 best_params = study.best_params
 print("Best Parameters:", best_params)
 
-# ---- 6. Train Final Model with Best Hyperparameters ----
+# ---- 7. Train Final Model on Train + Validation ----
 final_model = xgb.XGBClassifier(**best_params)
-final_model.fit(X_train[:, selected_features], y_train)
+X_train_valid = np.vstack((X_train, X_valid))  # Combine Train and Validation
+y_train_valid = np.hstack((y_train, y_valid))  # Combine Labels
 
-# ---- 7. Evaluate Final Model ----
-y_pred = final_model.predict_proba(X_test[:, selected_features], output_margin=True)
-final_aucpr = aucpr_metric(y_test, y_pred)
-print(f"Final AUCPR: {final_aucpr:.4f}")
+final_model.fit(X_train_valid[:, selected_features], y_train_valid)
+
+# ---- 8. Evaluate Final Model on Test Set ----
+y_pred_test = final_model.predict_proba(X_test[:, selected_features], output_margin=True)
+final_aucpr = aucpr_metric(y_test, y_pred_test)
+print(f"Final AUCPR on Test Set: {final_aucpr:.4f}")
