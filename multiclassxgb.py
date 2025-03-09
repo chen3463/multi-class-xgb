@@ -18,7 +18,6 @@ class FocalLoss:
         self.gamma = gamma
 
     def focal_loss(self, predt, dtrain):
-        """Compute the gradient and hessian for focal loss"""
         y = dtrain.get_label()
         p = np.exp(predt - np.max(predt, axis=1, keepdims=True))  # Softmax probabilities
         p /= np.sum(p, axis=1, keepdims=True)
@@ -32,13 +31,11 @@ class FocalLoss:
             grad[:, i] = g
             hess[:, i] = np.maximum(h, 1e-6)  # Avoid division by zero
 
-        return grad.ravel(), hess.ravel()
-
-    import numpy as np
+        return grad, hess  # ✅ Keep the original 2D shape (n_samples, n_classes)
 
     def softmax_xentropy(self, predt, dtrain):
         y = dtrain.get_label()  # Get the true labels from the training set
-        n_classes = predt.shape[1]  # Number of classes (3 in this case)
+        n_classes = predt.shape[1]  # Number of classes
 
         # Apply softmax to the predictions (if not already probabilities)
         exp_pred = np.exp(predt - np.max(predt, axis=1, keepdims=True))  # To avoid overflow
@@ -60,15 +57,15 @@ class FocalLoss:
 def objective(trial, X_train, y_train, X_valid, y_valid):
     # Suggest parameters for the model
     params = {
-        "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=10),  # Add n_estimators here
         "max_depth": trial.suggest_int("max_depth", 3, 15),
         "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.1, log=True),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
         "gamma": trial.suggest_float("gamma", 1e-6, 1.0, log=True),
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-6, 1.0, log=True),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-6, 1.0, log=True)
-
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-6, 1.0, log=True),
+        "objective": "multi:softprob",  # For multi-class classification
+        "num_class": len(np.unique(y_train))  # Specify the number of classes
     }
 
     # Train the XGBoost model with the suggested hyperparameters
@@ -87,26 +84,42 @@ study.optimize(partial(objective, X_train=X_train, y_train=y_train, X_valid=X_va
 
 # Train final model with best hyperparameters
 best_params = study.best_params
-best_params["objective"] = "multi:softprob"
-best_params["num_class"] = len(np.unique(y_train))
+best_params["num_class"] = len(np.unique(y_train))  # Add num_class here
 
+# Custom Focal Loss
 focal_loss = FocalLoss(gamma=2.0)
+
+# Convert the datasets to DMatrix format
 dtrain = xgb.DMatrix(X_train, label=y_train)
 dvalid = xgb.DMatrix(X_valid, label=y_valid)
 
+# Use a fixed value for num_boost_round
+num_boost_round = 100  # This can be adjusted based on results from Optuna
+
+# Final model training using xgb.train() with the custom loss and metric
 final_model = xgb.train(
     best_params,
     dtrain,
-    num_boost_round=best_params["n_estimators"],
+    num_boost_round=num_boost_round,  # Use a fixed number of boosting rounds
     evals=[(dvalid, "validation")],
-    obj=focal_loss.focal_loss,
-    custom_metric=focal_loss.softmax_xentropy,
+    obj=focal_loss.focal_loss,  # Use the custom focal loss function
+    custom_metric=focal_loss.softmax_xentropy,  # Use the custom softmax cross-entropy metric
     early_stopping_rounds=20,
     verbose_eval=True,
 )
 
-# Evaluate on validation set
-preds = final_model.predict(dvalid)
-best_preds = np.argmax(preds, axis=1)
+# Get class probabilities
+preds = final_model.predict(dvalid)  # Should return (n_samples, n_classes)
+print("Shape of preds:", preds.shape)  # Debugging step
+
+# Convert probabilities to class labels
+if preds.ndim == 1:
+    best_preds = preds  # If it's 1D, assume it contains class labels already
+else:
+    best_preds = np.argmax(preds, axis=1)  # Otherwise, get the highest probability class
+
+# Compute final accuracy
 final_accuracy = accuracy_score(y_valid, best_preds)
 print(f"Final Model Accuracy: {final_accuracy:.4f}")
+
+
