@@ -1,105 +1,98 @@
-import numpy as np
-import pandas as pd
 import xgboost as xgb
-import shap
+import numpy as np
 import optuna
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import average_precision_score
-from sklearn.inspection import permutation_importance
-from scipy.special import softmax
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
+from sklearn.datasets import make_classification
+from functools import partial
 
-# ---- 1. Load and Split Data ----
-X = pd.DataFrame(np.random.randn(10000, 20), columns=[f'feat_{i}' for i in range(20)])
-y = np.random.randint(0, 4, 10000)  # Multi-class labels (4 classes)
+X, y = make_classification(n_samples=5000, n_features=20, n_informative=3,
+                           n_classes=3, n_clusters_per_class=2, random_state=42)
 
-# Split into Train (64%) / Validation (16%) / Test (20%)
-X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.36, stratify=y, random_state=42)
-X_valid, X_test, y_valid, y_test = train_test_split(X_temp, y_temp, test_size=20/36, stratify=y_temp, random_state=42)
+X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Scale Features
-scaler = StandardScaler()
-X_train = scaler.fit_transform(X_train)
-X_valid = scaler.transform(X_valid)
-X_test = scaler.transform(X_test)
 
-# ---- 2. Feature Selection (SHAP + Permutation Importance) ----
-def feature_selection(model, X_train, y_train):
-    """Select features using SHAP and Permutation Importance."""
-    model.fit(X_train, y_train)
-    
-    # SHAP Analysis
-    explainer = shap.Explainer(model)
-    shap_values = explainer(X_train)
-    shap_importance = np.abs(shap_values.values).mean(axis=0)
-    
-    # Permutation Importance
-    perm_importance = permutation_importance(model, X_train, y_train, scoring='f1_weighted', n_repeats=10)
-    
-    # Aggregate Feature Scores
-    importance = shap_importance + perm_importance.importances_mean
-    selected_features = np.argsort(importance)[-15:]  # Select top 15 features
+# Focal Loss Implementation for Multi-Class Classification
+class FocalLoss:
+    def __init__(self, gamma=2.0):
+        self.gamma = gamma
 
-    return selected_features
+    def focal_loss(self, predt, dtrain):
+        """Compute the gradient and hessian for focal loss"""
+        y = dtrain.get_label()
+        p = np.exp(predt - np.max(predt, axis=1, keepdims=True))  # Softmax probabilities
+        p /= np.sum(p, axis=1, keepdims=True)
 
-# ---- 3. Custom Focal Loss for Multi-Class ----
-def focal_loss(predt, dtrain, gamma=2.0):
-    """Compute Focal Loss for XGBoost."""
-    labels = dtrain.get_label().astype(int)
-    num_classes = predt.shape[1]
-    pred_probs = softmax(predt, axis=1)
+        grad = np.zeros_like(predt)
+        hess = np.zeros_like(predt)
 
-    pt = pred_probs[np.arange(len(labels)), labels]
-    grad = (1 - pt) ** gamma * (pt - 1)[:, None] * (labels[:, None] == np.arange(num_classes))
-    hess = (1 - pt) ** gamma * (pt * (1 - pt) + gamma * (pt - 1) * np.log(pt))[:, None] * (labels[:, None] == np.arange(num_classes))
+        for i in range(predt.shape[1]):  # Loop over classes
+            g = (p[:, i] - (y == i)) * ((1 - p[:, i]) ** self.gamma)
+            h = (1 - 2 * p[:, i]) * g - self.gamma * (p[:, i] * np.log(p[:, i] + 1e-8)) * ((y == i) - p[:, i])
+            grad[:, i] = g
+            hess[:, i] = np.maximum(h, 1e-6)  # Avoid division by zero
 
-    return grad.flatten(), hess.flatten()
+        return grad.ravel(), hess.ravel()
 
-# ---- 4. Custom AUCPR Metric ----
-def aucpr_metric(y_true, y_pred):
-    """Compute AUCPR for Multi-Class Classification."""
-    pred_probs = softmax(y_pred, axis=1)
-    aucpr_scores = [average_precision_score((y_true == c).astype(int), pred_probs[:, c]) for c in range(pred_probs.shape[1])]
-    return np.mean(aucpr_scores)
+    def softmax_xentropy(self, predt, dtrain):
+        """Custom evaluation metric: softmax cross entropy with focal loss"""
+        y = dtrain.get_label()
+        p = np.exp(predt - np.max(predt, axis=1, keepdims=True))
+        p /= np.sum(p, axis=1, keepdims=True)
+        loss = -np.sum((y == np.arange(predt.shape[1])) * np.log(p + 1e-8) * ((1 - p) ** self.gamma), axis=1)
+        return 'focal_loss', np.mean(loss)
 
-# ---- 5. Hyperparameter Tuning using Train + Validation ----
-def objective(trial):
-    """Optimize XGBoost hyperparameters."""
+
+# Optuna objective function for hyperparameter tuning
+def objective(trial, X_train, y_train, X_valid, y_valid):
+    # Suggest parameters for the model
     params = {
-        "learning_rate": trial.suggest_loguniform("learning_rate", 0.01, 0.3),
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
-        "gamma": trial.suggest_loguniform("gamma", 0.5, 5.0),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=10),  # Add n_estimators here
+        "learning_rate": trial.suggest_loguniform("learning_rate", 0.001, 0.1),
+        "max_depth": trial.suggest_int("max_depth", 3, 15),
         "subsample": trial.suggest_uniform("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_uniform("colsample_bytree", 0.6, 1.0),
-        "num_class": 4,
-        "objective": "multi:softprob"
+        "colsample_bytree": trial.suggest_uniform("colsample_bytree", 0.5, 1.0),
+        "gamma": trial.suggest_loguniform("gamma", 1e-6, 1.0),
+        "reg_alpha": trial.suggest_loguniform("reg_alpha", 1e-6, 1.0),
+        "reg_lambda": trial.suggest_loguniform("reg_lambda", 1e-6, 1.0)
     }
 
+    # Train the XGBoost model with the suggested hyperparameters
     model = xgb.XGBClassifier(**params)
-    model.fit(X_train[:, selected_features], y_train, eval_set=[(X_valid[:, selected_features], y_valid)], early_stopping_rounds=10, verbose=False)
-    
-    y_pred = model.predict_proba(X_valid[:, selected_features], output_margin=True)
-    return aucpr_metric(y_valid, y_pred)
+    model.fit(X_train, y_train)
 
-# ---- 6. Run Hyperparameter Tuning ----
-base_model = xgb.XGBClassifier(objective="multi:softprob", num_class=4)
-selected_features = feature_selection(base_model, X_train, y_train)
+    # Calculate validation score or any metric you'd like
+    score = model.score(X_valid, y_valid)
 
+    return score
+
+
+# Run Optuna hyperparameter tuning
 study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=20)
+study.optimize(partial(objective, X_train=X_train, y_train=y_train, X_valid=X_valid, y_valid=y_valid), n_trials=50)
 
+# Train final model with best hyperparameters
 best_params = study.best_params
-print("Best Parameters:", best_params)
+best_params["objective"] = "multi:softprob"
+best_params["num_class"] = len(np.unique(y_train))
 
-# ---- 7. Train Final Model on Train + Validation ----
-final_model = xgb.XGBClassifier(**best_params)
-X_train_valid = np.vstack((X_train, X_valid))  # Combine Train and Validation
-y_train_valid = np.hstack((y_train, y_valid))  # Combine Labels
+focal_loss = FocalLoss(gamma=2.0)
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dvalid = xgb.DMatrix(X_valid, label=y_valid)
 
-final_model.fit(X_train_valid[:, selected_features], y_train_valid)
+final_model = xgb.train(
+    best_params,
+    dtrain,
+    num_boost_round=best_params["n_estimators"],
+    evals=[(dvalid, "validation")],
+    obj=focal_loss.focal_loss,
+    feval=focal_loss.softmax_xentropy,
+    early_stopping_rounds=20,
+    verbose_eval=True,
+)
 
-# ---- 8. Evaluate Final Model on Test Set ----
-y_pred_test = final_model.predict_proba(X_test[:, selected_features], output_margin=True)
-final_aucpr = aucpr_metric(y_test, y_pred_test)
-print(f"Final AUCPR on Test Set: {final_aucpr:.4f}")
+# Evaluate on validation set
+preds = final_model.predict(dvalid)
+best_preds = np.argmax(preds, axis=1)
+final_accuracy = accuracy_score(y_valid, best_preds)
+print(f"Final Model Accuracy: {final_accuracy:.4f}")
