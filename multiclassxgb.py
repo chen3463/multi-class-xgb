@@ -122,4 +122,20 @@ else:
 final_accuracy = accuracy_score(y_valid, best_preds)
 print(f"Final Model Accuracy: {final_accuracy:.4f}")
 
+import numpy as np
+
+# Get feature importance from the trained model
+importance = final_model.get_score(importance_type='gain')
+
+# Normalize the importance values
+total_importance = sum(importance.values())
+normalized_importance = {k: v / total_importance for k, v in importance.items()}
+
+# Sort and print feature importance
+sorted_importance = sorted(normalized_importance.items(), key=lambda x: x[1], reverse=True)
+
+print("\nNormalized Feature Importance:")
+for feature, score in sorted_importance:
+    print(f"Feature {feature}: {score:.4f}")
+
 
