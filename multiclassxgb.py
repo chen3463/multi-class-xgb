@@ -14,8 +14,9 @@ X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, rando
 
 # Focal Loss Implementation for Multi-Class Classification
 class FocalLoss:
-    def __init__(self, gamma=2.0):
+    def __init__(self, gamma=2.0, alpha=1.0):
         self.gamma = gamma
+        self.alpha = alpha  # Alpha to adjust the weight of classes
 
     def focal_loss(self, predt, dtrain):
         y = dtrain.get_label()
@@ -26,12 +27,14 @@ class FocalLoss:
         hess = np.zeros_like(predt)
 
         for i in range(predt.shape[1]):  # Loop over classes
-            g = (p[:, i] - (y == i)) * ((1 - p[:, i]) ** self.gamma)
-            h = (1 - 2 * p[:, i]) * g - self.gamma * (p[:, i] * np.log(p[:, i] + 1e-8)) * ((y == i) - p[:, i])
+            # Apply alpha to the class loss
+            alpha_i = self.alpha if (y == i).any() else 1.0
+            g = alpha_i * (p[:, i] - (y == i)) * ((1 - p[:, i]) ** self.gamma)
+            h = alpha_i * (1 - 2 * p[:, i]) * g - self.gamma * (p[:, i] * np.log(p[:, i] + 1e-8)) * ((y == i) - p[:, i])
             grad[:, i] = g
             hess[:, i] = np.maximum(h, 1e-6)  # Avoid division by zero
 
-        return grad, hess  # ✅ Keep the original 2D shape (n_samples, n_classes)
+        return grad, hess  # Return gradient and hessian
 
     def softmax_xentropy(self, predt, dtrain):
         y = dtrain.get_label()  # Get the true labels from the training set
@@ -69,7 +72,7 @@ def objective(trial, X_train, y_train, X_valid, y_valid):
     }
 
     # Train the XGBoost model with the suggested hyperparameters
-    model = xgb.XGBClassifier(**params)
+    model = xgb.XGBClassifier(**params, enable_categorical=True)
     model.fit(X_train, y_train)
 
     # Calculate validation score or any metric you'd like
@@ -90,8 +93,8 @@ best_params["num_class"] = len(np.unique(y_train))  # Add num_class here
 focal_loss = FocalLoss(gamma=2.0)
 
 # Convert the datasets to DMatrix format
-dtrain = xgb.DMatrix(X_train, label=y_train)
-dvalid = xgb.DMatrix(X_valid, label=y_valid)
+dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
+dvalid = xgb.DMatrix(X_valid, label=y_valid, enable_categorical=True)
 
 # Use a fixed value for num_boost_round
 num_boost_round = 100  # This can be adjusted based on results from Optuna
