@@ -6,8 +6,8 @@ from sklearn.metrics import accuracy_score
 from sklearn.datasets import make_classification
 from functools import partial
 
-X, y = make_classification(n_samples=5000, n_features=20, n_informative=3,
-                           n_classes=3, n_clusters_per_class=2, random_state=42)
+X, y = make_classification(n_samples=10000, n_features=20, n_informative=6,
+                           n_classes=6, n_clusters_per_class=4, random_state=42)
 
 X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
 
@@ -34,13 +34,26 @@ class FocalLoss:
 
         return grad.ravel(), hess.ravel()
 
+    import numpy as np
+
     def softmax_xentropy(self, predt, dtrain):
-        """Custom evaluation metric: softmax cross entropy with focal loss"""
-        y = dtrain.get_label()
-        p = np.exp(predt - np.max(predt, axis=1, keepdims=True))
-        p /= np.sum(p, axis=1, keepdims=True)
-        loss = -np.sum((y == np.arange(predt.shape[1])) * np.log(p + 1e-8) * ((1 - p) ** self.gamma), axis=1)
-        return 'focal_loss', np.mean(loss)
+        y = dtrain.get_label()  # Get the true labels from the training set
+        n_classes = predt.shape[1]  # Number of classes (3 in this case)
+
+        # Apply softmax to the predictions (if not already probabilities)
+        exp_pred = np.exp(predt - np.max(predt, axis=1, keepdims=True))  # To avoid overflow
+        p = exp_pred / np.sum(exp_pred, axis=1, keepdims=True)  # Softmax probabilities
+
+        # Clip the predictions to avoid log(0) or NaN issues
+        p = np.clip(p, 1e-7, 1 - 1e-7)
+
+        # One-hot encode the true labels
+        y_one_hot = np.eye(n_classes)[y.astype(int)]
+
+        # Softmax Cross-Entropy Loss with gamma adjustment
+        loss = -np.sum(y_one_hot * np.log(p) * ((1 - p) ** self.gamma), axis=1)
+
+        return 'softmax_xentropy', np.mean(loss)  # Return the name and the loss value
 
 
 # Optuna objective function for hyperparameter tuning
@@ -48,13 +61,14 @@ def objective(trial, X_train, y_train, X_valid, y_valid):
     # Suggest parameters for the model
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=10),  # Add n_estimators here
-        "learning_rate": trial.suggest_loguniform("learning_rate", 0.001, 0.1),
         "max_depth": trial.suggest_int("max_depth", 3, 15),
-        "subsample": trial.suggest_uniform("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_uniform("colsample_bytree", 0.5, 1.0),
-        "gamma": trial.suggest_loguniform("gamma", 1e-6, 1.0),
-        "reg_alpha": trial.suggest_loguniform("reg_alpha", 1e-6, 1.0),
-        "reg_lambda": trial.suggest_loguniform("reg_lambda", 1e-6, 1.0)
+        "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.1, log=True),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "gamma": trial.suggest_float("gamma", 1e-6, 1.0, log=True),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-6, 1.0, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 1e-6, 1.0, log=True)
+
     }
 
     # Train the XGBoost model with the suggested hyperparameters
@@ -69,7 +83,7 @@ def objective(trial, X_train, y_train, X_valid, y_valid):
 
 # Run Optuna hyperparameter tuning
 study = optuna.create_study(direction="maximize")
-study.optimize(partial(objective, X_train=X_train, y_train=y_train, X_valid=X_valid, y_valid=y_valid), n_trials=50)
+study.optimize(partial(objective, X_train=X_train, y_train=y_train, X_valid=X_valid, y_valid=y_valid), n_trials=5)
 
 # Train final model with best hyperparameters
 best_params = study.best_params
@@ -86,7 +100,7 @@ final_model = xgb.train(
     num_boost_round=best_params["n_estimators"],
     evals=[(dvalid, "validation")],
     obj=focal_loss.focal_loss,
-    feval=focal_loss.softmax_xentropy,
+    custom_metric=focal_loss.softmax_xentropy,
     early_stopping_rounds=20,
     verbose_eval=True,
 )
