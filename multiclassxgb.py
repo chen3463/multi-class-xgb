@@ -67,6 +67,7 @@ def objective(trial, X_train, y_train, X_valid, y_valid):
         "gamma": trial.suggest_float("gamma", 1e-6, 1.0, log=True),
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-6, 1.0, log=True),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-6, 1.0, log=True),
+        "alpha": trial.suggest_float("alpha", 0.1, 2.0),  # Added alpha as a hyperparameter
         "objective": "multi:softprob",  # For multi-class classification
         "num_class": len(np.unique(y_train))  # Specify the number of classes
     }
@@ -90,7 +91,7 @@ best_params = study.best_params
 best_params["num_class"] = len(np.unique(y_train))  # Add num_class here
 
 # Custom Focal Loss
-focal_loss = FocalLoss(gamma=2.0)
+focal_loss = FocalLoss(gamma=best_params["gamma"], alpha=best_params["alpha"])
 
 # Convert the datasets to DMatrix format
 dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
@@ -140,5 +141,3 @@ sorted_importance = sorted(normalized_importance.items(), key=lambda x: x[1], re
 print("\nNormalized Feature Importance:")
 for feature, score in sorted_importance:
     print(f"Feature {feature}: {score:.4f}")
-
-
