@@ -93,34 +93,35 @@ best_params["num_class"] = len(np.unique(y_train))  # Add num_class here
 # Custom Focal Loss
 focal_loss = FocalLoss(gamma=best_params["gamma"], alpha=best_params["alpha"])
 
-# Convert the datasets to DMatrix format
-dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
-dvalid = xgb.DMatrix(X_valid, label=y_valid, enable_categorical=True)
+# Define the best hyperparameters from Optuna
+best_params = study.best_params
+best_params["num_class"] = len(np.unique(y_train))  # Ensure num_class is set
 
-# Use a fixed value for num_boost_round
-num_boost_round = 100  # This can be adjusted based on results from Optuna
+# Add alpha and gamma from hyperparameter tuning
+best_alpha = best_params.get("alpha", 1.0)  # Default to 1.0 if not tuned
+best_gamma = best_params.get("gamma", 2.0)  # Default to 2.0 if not tuned
 
-# Final model training using xgb.train() with the custom loss and metric
-final_model = xgb.train(
-    best_params,
-    dtrain,
-    num_boost_round=num_boost_round,  # Use a fixed number of boosting rounds
-    evals=[(dvalid, "validation")],
-    obj=focal_loss.focal_loss,  # Use the custom focal loss function
-    custom_metric=focal_loss.softmax_xentropy,  # Use the custom softmax cross-entropy metric
-    early_stopping_rounds=20,
-    verbose_eval=True,
-)
+# Define custom focal loss with optimized alpha and gamma
+focal_loss = FocalLoss(gamma=best_gamma, alpha=best_alpha)
+
+# Train the XGBClassifier model using the best hyperparameters
+final_model = xgb.XGBClassifier(**best_params, 
+                                enable_categorical=True, 
+                                use_label_encoder=False, 
+                                eval_metric=focal_loss.softmax_xentropy)  # Custom metric
+
+# Fit the model using the custom loss function
+final_model.fit(X_train, y_train,
+                eval_set=[(X_valid, y_valid)],
+                early_stopping_rounds=20,
+                verbose=True)
 
 # Get class probabilities
-preds = final_model.predict(dvalid)  # Should return (n_samples, n_classes)
+preds = final_model.predict_proba(X_valid)  # Should return (n_samples, n_classes)
 print("Shape of preds:", preds.shape)  # Debugging step
 
 # Convert probabilities to class labels
-if preds.ndim == 1:
-    best_preds = preds  # If it's 1D, assume it contains class labels already
-else:
-    best_preds = np.argmax(preds, axis=1)  # Otherwise, get the highest probability class
+best_preds = np.argmax(preds, axis=1)  # Get the highest probability class
 
 # Compute final accuracy
 final_accuracy = accuracy_score(y_valid, best_preds)
