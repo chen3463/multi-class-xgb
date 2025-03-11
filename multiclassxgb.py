@@ -147,6 +147,7 @@ best_preds = final_model.predict(dvalid)
 # ✅ Compute Final Accuracy and Weighted F1-score
 final_accuracy = accuracy_score(y_valid, best_preds)
 final_f1 = f1_score(y_valid, best_preds, average="weighted")  # Weighted F1-score
-
+rp = classification_report(y_valid, best_preds, digits=4)
 print(f"Final Model Accuracy: {final_accuracy:.4f}")
 print(f"Final Model Weighted F1-Score: {final_f1:.4f}")
+print(f"Classification report F1-Score: {rp:.4f}")
