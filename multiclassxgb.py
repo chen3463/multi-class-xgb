@@ -91,16 +91,17 @@ def objective(trial):
         "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.1, log=True),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-        "gamma": trial.suggest_float("gamma", 1e-6, 1.0, log=True),
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-6, 1.0, log=True),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-6, 1.0, log=True),
-        "alpha": trial.suggest_float("alpha", 0.1, 2.0),  # Added alpha as a hyperparameter
         "objective": "multi:softprob",  # Multi-class classification
         "num_class": len(np.unique(y_train))  # Specify number of classes
     }
+    # Tune focal loss hyperparameters
+    gamma = trial.suggest_float("focal_gamma", 2.0, 5.0)  # Adjust range if needed
+    alpha = trial.suggest_float("focal_alpha", 0.1, 2.0)  # Adjust based on class imbalance
 
     # ✅ Train XGB Model using Custom Focal Loss
-    focal_loss = FocalLoss(gamma=2.0, alpha=1.0)
+    focal_loss = FocalLoss(gamma=gamma, alpha=alpha)
     model = xgb.train(
         params,
         dtrain,
@@ -128,9 +129,23 @@ best_params = study.best_params
 best_params["num_class"] = len(np.unique(y_train))  # Ensure num_class is set
 
 # ✅ Train Final Model using XGBoost with Focal Loss
-focal_loss = FocalLoss(gamma=2.0, alpha=1.0)
+# ✅ Add focal loss parameters to best_params
+focal_loss = FocalLoss(gamma=best_params['focal_gamma'], alpha=best_params['focal_alpha'])
+
+# Update `best_params` for training
+xgb_params = {
+    "max_depth": best_params["max_depth"],
+    "learning_rate": best_params["learning_rate"],
+    "subsample": best_params["subsample"],
+    "colsample_bytree": best_params["colsample_bytree"],
+    "reg_alpha": best_params["reg_alpha"],
+    "reg_lambda": best_params["reg_lambda"],
+    "objective": "multi:softprob",  # For multi-class classification
+    "num_class": len(np.unique(y_train))  # Specify number of classes
+}
+
 final_model = xgb.train(
-    best_params,
+    xgb_params,
     dtrain,
     num_boost_round=1000,
     evals=[(dvalid, "validation")],
@@ -141,13 +156,19 @@ final_model = xgb.train(
 )
 
 # ✅ Get Final Predictions
-best_preds = final_model.predict(dvalid)
-# best_preds = np.argmax(preds, axis=1)  # Convert probabilities to class labels
+preds = final_model.predict(dvalid)
+print(preds)
+print("Shape of preds:", preds.shape)
+
+# Convert probabilities to class labels
+if preds.ndim == 1:
+    best_preds = preds  # If it's 1D, assume it contains class labels already
+else:
+    best_preds = np.argmax(preds, axis=1)  # Otherwise, get the highest probability class
 
 # ✅ Compute Final Accuracy and Weighted F1-score
 final_accuracy = accuracy_score(y_valid, best_preds)
 final_f1 = f1_score(y_valid, best_preds, average="weighted")  # Weighted F1-score
-rp = classification_report(y_valid, best_preds, digits=4)
+
 print(f"Final Model Accuracy: {final_accuracy:.4f}")
 print(f"Final Model Weighted F1-Score: {final_f1:.4f}")
-print(f"Classification report F1-Score: {rp:.4f}")
